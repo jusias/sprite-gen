@@ -29,3 +29,17 @@ Outputs are non-destructive:
 
 The original `sprite-sheet-alpha.png` and `manifest.json` remain compose/correction SOTs.
 Installers copy the compact manifest under the runtime name only after QA.
+
+## Individual-frame source
+
+When `frames/frames-manifest.json` exists, `compact-atlas` reads its ordered
+`rows[].files[]` PNGs directly instead of cutting cells back out of the composed atlas.
+For each PNG it finds the alpha bounds, applies `--alpha-padding`, and writes the packed
+`page/x/y/w/h` plus logical-cell `sourceX/sourceY` offsets to `manifest.compact.json`.
+It also records `pivotX/pivotY` in trimmed-frame pixels from the top-left. The pivot is
+the original logical cell's bottom-center, so it remains stable even when transparent
+bottom or side padding is removed. `frame_layout.logicalPivot` and `pivotOrigin` make
+that coordinate contract explicit.
+This is a pixel-for-pixel crop: there is no resampling or regeneration, and long weapons
+cannot spill into a neighboring atlas cell. The composed-atlas path remains as a
+backward-compatible fallback for older runs without a frames manifest.

@@ -25,10 +25,12 @@ class Rect:
 
 @dataclass
 class Item:
-    key: tuple[int, int, int, int]
+    key: tuple[Any, ...]
     image: Image.Image
     source_x: int
     source_y: int
+    pivot_x: float
+    pivot_y: float
     states: set[str]
     page: int = -1
     x: int = -1
@@ -107,6 +109,7 @@ class MaxRectsPage:
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--manifest", default="manifest.json")
+    parser.add_argument("--frames-manifest", default="frames/frames-manifest.json")
     parser.add_argument("--output-manifest", default="manifest.compact.json")
     parser.add_argument("--report", default="compact-atlas.report.json")
     parser.add_argument("--page-prefix", default="sprite-sheet-alpha")
@@ -170,10 +173,27 @@ def _trim(source: Image.Image, rect: dict[str, Any], padding: int) -> tuple[Imag
     return cell.crop((left, top, right, bottom)), source_x, source_y
 
 
+def _trim_frame(frame: Image.Image, padding: int, label: str) -> tuple[Image.Image, int, int]:
+    """Crop one logical-cell frame without resampling any source pixels."""
+    bbox = frame.getchannel("A").getbbox()
+    if bbox is None:
+        raise SystemExit(f"frame {label} is fully transparent")
+    left = max(0, bbox[0] - padding)
+    top = max(0, bbox[1] - padding)
+    right = min(frame.width, bbox[2] + padding)
+    bottom = min(frame.height, bbox[3] + padding)
+    return frame.crop((left, top, right, bottom)), left, top
+
+
 def _load_items(manifest: dict[str, Any], source: Image.Image, padding: int) -> tuple[dict[tuple[int, int, int, int], Item], dict[str, list[Item]]]:
-    rows = manifest.get("frame_layout", {}).get("rows")
+    frame_layout = manifest.get("frame_layout", {})
+    rows = frame_layout.get("rows")
     if not isinstance(rows, dict) or not rows:
         raise SystemExit("manifest.frame_layout.rows is required")
+    cell_width = int(frame_layout.get("cellWidth", manifest.get("animation", {}).get("cellWidth", 0)))
+    cell_height = int(frame_layout.get("cellHeight", manifest.get("animation", {}).get("cellHeight", 0)))
+    if cell_width <= 0 or cell_height <= 0:
+        raise SystemExit("manifest logical cell size is required")
     items: dict[tuple[int, int, int, int], Item] = {}
     clips: dict[str, list[Item]] = {}
     for state, frames in rows.items():
@@ -185,7 +205,67 @@ def _load_items(manifest: dict[str, Any], source: Image.Image, padding: int) -> 
             item = items.get(key)
             if item is None:
                 image, source_x, source_y = _trim(source, rect, padding)
-                item = Item(key, image, source_x, source_y, set())
+                item = Item(
+                    key, image, source_x, source_y,
+                    cell_width * 0.5 - source_x, cell_height - source_y, set())
+                items[key] = item
+            item.states.add(state)
+            clip.append(item)
+        clips[state] = clip
+    return items, clips
+
+
+def _load_frame_items(
+    manifest: dict[str, Any], frames_manifest: dict[str, Any], run_dir: Path, padding: int,
+) -> tuple[dict[tuple[Any, ...], Item], dict[str, list[Item]]]:
+    layout_rows = manifest.get("frame_layout", {}).get("rows")
+    frame_rows = frames_manifest.get("rows")
+    if not isinstance(layout_rows, dict) or not layout_rows:
+        raise SystemExit("manifest.frame_layout.rows is required")
+    if not isinstance(frame_rows, list) or not frame_rows:
+        raise SystemExit("frames manifest rows must be a non-empty array")
+
+    expected_states = list(layout_rows)
+    actual_states = [row.get("state") for row in frame_rows if isinstance(row, dict)]
+    if len(actual_states) != len(set(actual_states)) or set(actual_states) != set(expected_states):
+        raise SystemExit("frames manifest states do not match manifest.frame_layout.rows")
+
+    frame_layout = manifest["frame_layout"]
+    cell_width = int(frame_layout.get("cellWidth", manifest.get("animation", {}).get("cellWidth", 0)))
+    cell_height = int(frame_layout.get("cellHeight", manifest.get("animation", {}).get("cellHeight", 0)))
+    if cell_width <= 0 or cell_height <= 0:
+        raise SystemExit("manifest logical cell size is required")
+
+    items: dict[tuple[Any, ...], Item] = {}
+    clips: dict[str, list[Item]] = {}
+    for row in frame_rows:
+        state = str(row["state"])
+        files = row.get("files")
+        expected_frames = layout_rows[state]
+        if not isinstance(files, list) or len(files) != len(expected_frames):
+            raise SystemExit(
+                f"frames manifest {state} file count does not match frame layout "
+                f"({len(files) if isinstance(files, list) else 0} vs {len(expected_frames)})")
+        clip: list[Item] = []
+        for frame_index, relative_name in enumerate(files):
+            if not isinstance(relative_name, str) or not relative_name:
+                raise SystemExit(f"frames manifest {state} frame {frame_index} has no file")
+            frame_path = (run_dir / relative_name).resolve()
+            try:
+                frame_path.relative_to(run_dir)
+            except ValueError as exc:
+                raise SystemExit(f"frame path escapes run directory: {relative_name}") from exc
+            if not frame_path.is_file():
+                raise SystemExit(f"frame does not exist: {frame_path}")
+            with Image.open(frame_path) as opened:
+                frame = opened.convert("RGBA")
+            image, source_x, source_y = _trim_frame(frame, padding, relative_name)
+            key = (relative_name,)
+            item = items.get(key)
+            if item is None:
+                item = Item(
+                    key, image, source_x, source_y,
+                    cell_width * 0.5 - source_x, cell_height - source_y, set())
                 items[key] = item
             item.states.add(state)
             clip.append(item)
@@ -285,10 +365,17 @@ def _run(args: argparse.Namespace) -> int:
     if not manifest_path.is_file():
         raise SystemExit(f"manifest does not exist: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    source_path = _source_atlas(manifest, run_dir)
-    with Image.open(source_path) as opened:
-        source = opened.convert("RGBA")
-    items, clips = _load_items(manifest, source, args.alpha_padding)
+    frames_manifest_path = run_dir / args.frames_manifest
+    if frames_manifest_path.is_file():
+        frames_manifest = json.loads(frames_manifest_path.read_text(encoding="utf-8"))
+        items, clips = _load_frame_items(manifest, frames_manifest, run_dir, args.alpha_padding)
+        frame_source = args.frames_manifest
+    else:
+        source_path = _source_atlas(manifest, run_dir)
+        with Image.open(source_path) as opened:
+            source = opened.convert("RGBA")
+        items, clips = _load_items(manifest, source, args.alpha_padding)
+        frame_source = str(source_path.relative_to(run_dir))
 
     pages = _pack_clips(clips, args.page_size, args.gutter, args.max_pages)
     empty_before = _empty_percent(items.values(), len(pages), args.page_size, args.gutter)
@@ -311,6 +398,8 @@ def _run(args: argparse.Namespace) -> int:
         "sheetCount": len(pages),
         "sheets": page_names,
         "packing": "maxrects-bssf-array-v1",
+        "pivotOrigin": "trimmed-frame-top-left-pixels",
+        "logicalPivot": {"x": frame_layout["cellWidth"] * 0.5, "y": frame_layout["cellHeight"]},
     })
     for state, frames in frame_layout["rows"].items():
         compact_frames = []
@@ -323,6 +412,8 @@ def _run(args: argparse.Namespace) -> int:
                 "h": item.image.height,
                 "sourceX": item.source_x,
                 "sourceY": item.source_y,
+                "pivotX": item.pivot_x,
+                "pivotY": item.pivot_y,
             })
         frame_layout["rows"][state] = compact_frames
     output["sprite_sheet_alpha"] = page_names[0]
@@ -337,6 +428,7 @@ def _run(args: argparse.Namespace) -> int:
         "emptyPercent": round(empty_after, 4),
         "allowClipSplitOverThreshold": bool(args.allow_clip_split_over_threshold),
         "clipSplitApplied": split_applied,
+        "frameSource": frame_source,
     }
 
     for name, image in zip(page_names, page_images):
@@ -356,6 +448,7 @@ def _run(args: argparse.Namespace) -> int:
         "thresholdExceeded": empty_after > args.max_empty_percent,
         "clipSplitApplied": split_applied,
         "clipsSpanningPages": {state: value for state, value in clip_pages.items() if len(value) > 1},
+        "frameSource": frame_source,
     }
     atomic_write_text(run_dir / args.report, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(report, ensure_ascii=False, indent=2))

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.6.1
+
+- Make `compact-atlas` pack the ordered individual PNGs recorded in
+  `frames/frames-manifest.json`, preserving long weapons without re-slicing a composed
+  grid while retaining the composed-atlas fallback for older runs.
+
 All notable public changes to `sprite-gen` are recorded here. Versions track the `version:` field in `SKILL.md` and `pyproject.toml`.
 
 ## v2.5.3 - Reference facing controls and observed action returns

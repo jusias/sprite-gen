@@ -12,6 +12,9 @@ Use one accepted, uncropped, full-body idle image with the intended proportions,
 2. **Generate rows.** Use `gen-set --provider codex` for the GPT image-sprite route. The provider that made the base is an independent choice. Attach the resolved identity reference and that state's generated layout guide. Extra motion references must be recorded in `qa-notes.md`. Independent rows use the existing batch concurrency; [gen](gen.md) owns its execution and reports.
 3. **Extract.** Run the canonical extractor for every raw row. It removes chroma, separates characters, applies the requested pixel processing and places transparent frames. Never replace this with equal-width cuts or a one-line resize for a preview. A character crossing an imaginary slot can still be extracted intact when the poses are separable. Actual missing/occluded pixels are not restored by cropping. Choose sufficient output dimensions to preserve the desired scale; [pixel-unfake](pixel-unfake.md) owns fit options.
 4. **Compose and verify.** Produce the atlas, runtime manifest and animation preview with existing compose tools. Inspect the frame manifest and output reports; reject empty frames, unwanted edge/chroma remnants and identity defects. Review motion as motion using [qa-motion](qa-motion.md). Do not hide failed motion by timing changes or silently replacing poses. A user's explicit slow preview request changes display speed, not the QA verdict.
+   `compact-atlas` prefers the ordered individual PNGs in `frames/frames-manifest.json`.
+   This avoids re-slicing a composed grid when a long weapon reaches a cell edge; see
+   [compact-atlas](compact-atlas.md).
 5. **Deliver.** Send the checked files, then follow the finish stage in the user workflow. Curation display is optional. After curation edits, exports come from the curated result, not the unedited frame cache.
 
 ```bash

@@ -105,6 +105,9 @@ def run_dir_mode(args: argparse.Namespace) -> int:
 
 
 def _run_dir_mode_guarded(args, run_dir):
+    if args.atlas_manifest:
+        return _run_atlas_mode(args, run_dir)
+
     frames_manifest = require_frames_manifest(run_dir)  # fail loud if this generation's manifest is absent/corrupt
     rows_by_state = {row["state"]: row for row in frames_manifest.get("rows", [])}
     request = load_request(run_dir)
@@ -195,12 +198,118 @@ def _run_dir_mode_guarded(args, run_dir):
     return 0
 
 
+def _run_atlas_mode(args: argparse.Namespace, run_dir: Path) -> int:
+    """Reconstruct logical frames from packed atlas pages and their runtime JSON."""
+    manifest_path = run_dir / args.atlas_manifest
+    if not manifest_path.is_file():
+        raise SystemExit(f"atlas manifest does not exist: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    animation = manifest.get("animation", {})
+    animation_rows = animation.get("rows")
+    frame_layout = manifest.get("frame_layout", {})
+    frame_rows = frame_layout.get("rows")
+    if not isinstance(animation_rows, dict) or not isinstance(frame_rows, dict):
+        raise SystemExit("atlas manifest requires animation.rows and frame_layout.rows")
+
+    cell_w = int(frame_layout.get("cellWidth", animation.get("cellWidth", 0)))
+    cell_h = int(frame_layout.get("cellHeight", animation.get("cellHeight", 0)))
+    if cell_w <= 0 or cell_h <= 0:
+        raise SystemExit("atlas manifest logical cell size is required")
+    sheet_names = frame_layout.get("sheets") or manifest.get("sprite_sheet_alpha_pages")
+    if not isinstance(sheet_names, list) or not sheet_names:
+        single = manifest.get("sprite_sheet_alpha") or manifest.get("game_input")
+        sheet_names = [single] if isinstance(single, str) and single else []
+    if not sheet_names:
+        raise SystemExit("atlas manifest has no sprite sheets")
+    pages = []
+    for name in sheet_names:
+        path = run_dir / str(name)
+        if not path.is_file():
+            raise SystemExit(f"atlas page does not exist: {path}")
+        with Image.open(path) as opened:
+            pages.append(opened.convert("RGBA"))
+
+    states = animation_rows
+    if args.state:
+        if args.state not in states:
+            raise SystemExit(f"unknown state '{args.state}' — manifest states: {', '.join(states)}")
+        states = {args.state: states[args.state]}
+    out_root = args.out_dir.expanduser().resolve() if args.out_dir else run_dir / "exports"
+    out_root.mkdir(parents=True, exist_ok=True)
+    logical_pivot = frame_layout.get("logicalPivot", {"x": cell_w * 0.5, "y": cell_h})
+
+    exports: list[dict] = []
+    for state, spec in states.items():
+        rects = frame_rows.get(state)
+        expected_count = int(spec.get("frames", 0))
+        if not isinstance(rects, list) or len(rects) != expected_count:
+            raise SystemExit(
+                f"atlas frame count mismatch for {state}: {len(rects) if isinstance(rects, list) else 0} vs {expected_count}")
+        images: list[Image.Image] = []
+        for frame_index, rect in enumerate(rects):
+            page_index = int(rect.get("page", 0))
+            x, y = int(rect["x"]), int(rect["y"])
+            width, height = int(rect["w"]), int(rect["h"])
+            source_x, source_y = int(rect.get("sourceX", 0)), int(rect.get("sourceY", 0))
+            if page_index < 0 or page_index >= len(pages):
+                raise SystemExit(f"{state} frame {frame_index} page is out of range: {page_index}")
+            page = pages[page_index]
+            if (x < 0 or y < 0 or width <= 0 or height <= 0
+                    or x + width > page.width or y + height > page.height):
+                raise SystemExit(f"{state} frame {frame_index} atlas rect is out of range")
+            if (source_x < 0 or source_y < 0
+                    or source_x + width > cell_w or source_y + height > cell_h):
+                raise SystemExit(f"{state} frame {frame_index} source rect is out of range")
+            if "pivotX" in rect or "pivotY" in rect:
+                if "pivotX" not in rect or "pivotY" not in rect:
+                    raise SystemExit(f"{state} frame {frame_index} pivotX/pivotY must be paired")
+                restored_x = float(rect["pivotX"]) + source_x
+                restored_y = float(rect["pivotY"]) + source_y
+                if (abs(restored_x - float(logical_pivot["x"])) > 1e-6
+                        or abs(restored_y - float(logical_pivot["y"])) > 1e-6):
+                    raise SystemExit(f"{state} frame {frame_index} pivot does not restore logicalPivot")
+            frame = Image.new("RGBA", (cell_w, cell_h), (0, 0, 0, 0))
+            frame.alpha_composite(page.crop((x, y, x + width, y + height)), (source_x, source_y))
+            images.append(frame)
+
+        fps = float(spec.get("fps", 8)) or 8.0
+        out_path = out_root / f"{state}.gif"
+        save_clean_gif(
+            images, out_path, duration_ms=max(1, round(1000.0 / fps)),
+            loop=args.loop_count, alpha_threshold=args.alpha_threshold)
+        exports.append({
+            "state": state,
+            "output": str(out_path),
+            "frames": len(images),
+            "fps": fps,
+            "loop": bool(spec.get("loop", True)),
+            "source": args.atlas_manifest,
+            "gif_report": gif_report(out_path),
+        })
+
+    output = {
+        "version": 1,
+        "kind": "sprite-gen-gif-run",
+        "run_dir": str(run_dir),
+        "atlas_manifest": args.atlas_manifest,
+        "exports": exports,
+    }
+    (out_root / "gif-manifest.json").write_text(
+        json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps({"ok": True, **output}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("inputs", nargs="*", type=Path, help="ordered frame PNG files")
     parser.add_argument("--frame-dir", type=Path, help="directory containing frame-0.png, frame-1.png, ...")
     parser.add_argument("--frame-order", type=parse_frame_order, help="1-based order, for example 2,1,5,3")
     parser.add_argument("--run-dir", type=Path, help="run dir: export one GIF per state from sprite-request + curation")
+    parser.add_argument(
+        "--atlas-manifest",
+        help="run-dir mode: reconstruct frames from packed sprite sheets and this runtime manifest",
+    )
     parser.add_argument("--state", help="run-dir mode: export only this state (default: all states)")
     parser.add_argument("--scale", type=int, default=1,
                         help="integer NEAREST upscale baked into the GIF (review/share crispness; "
