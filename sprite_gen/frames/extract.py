@@ -2387,11 +2387,55 @@ def fit_component_to_bbox(component: Image.Image, cell_width: int, cell_height: 
     return target, mapping
 
 
-def extract_component_images(strip: Image.Image, frame_count: int) -> list[Image.Image] | None:
+def extract_component_images(strip: Image.Image, frame_count: int, subject: str = "character") -> list[Image.Image] | None:
     components = connected_components(strip)
     if not components:
         return None
     largest_area = max(component["area"] for component in components)
+    noise_threshold = max(12, largest_area * 0.002)
+
+    if subject == "effect":
+        slot_width = strip.width / float(frame_count)
+        slot_groups: list[list[dict[str, Any]]] = [[] for _ in range(frame_count)]
+        noise_dropped = 0
+
+        for component in components:
+            if component["area"] < noise_threshold:
+                noise_dropped += 1
+                continue
+
+            cx0, _cy0, cx1, _cy1 = component["bbox"]
+            center_x = component["center_x"]
+
+            # 슬롯 경계를 가로지르는 컴포넌트는 오류/경고로 드러낸다 (자르지 않음)
+            for k in range(1, frame_count):
+                boundary_x = k * slot_width
+                if cx0 < boundary_x < cx1:
+                    print(
+                        f"[extract] warning: effect component spans slot boundary at x={boundary_x:.1f} "
+                        f"(between slot {k-1} and {k}): bbox={component['bbox']}, area={component['area']}",
+                        file=sys.stderr,
+                    )
+
+            slot_idx = min(frame_count - 1, max(0, int(center_x // slot_width)))
+            slot_groups[slot_idx].append(component)
+
+        if noise_dropped:
+            print(f"[extract] dropped {noise_dropped} stray satellite component(s) below noise threshold", file=sys.stderr)
+
+        # 각 슬롯마다 컴포넌트를 묶어 프레임 이미지를 생성한다.
+        # seed는 슬롯 안 최대 컴포넌트이며, 슬롯의 모든 유효 컴포넌트가 하나의 프레임 이미지로 합성된다.
+        result_images: list[Image.Image] = []
+        for i, group in enumerate(slot_groups):
+            if group:
+                result_images.append(component_group_image(strip, group))
+            else:
+                sw = max(1, round((i + 1) * slot_width) - round(i * slot_width))
+                result_images.append(Image.new("RGBA", (sw, strip.height), (0, 0, 0, 0)))
+
+        return result_images
+
+    # character (기본값) — 기존 동작 바이트 단위 유지
     seed_threshold = max(120, largest_area * 0.20)
     seeds = [component for component in components if component["area"] >= seed_threshold]
     if len(seeds) < frame_count:
@@ -2405,7 +2449,6 @@ def extract_component_images(strip: Image.Image, frame_count: int) -> list[Image
     )
     seed_ids = {id(seed) for seed in seeds}
     groups: list[list[dict[str, Any]]] = [[seed] for seed in seeds]
-    noise_threshold = max(12, largest_area * 0.002)
 
     dropped = 0
     for component in components:
@@ -2433,8 +2476,8 @@ def extract_component_images(strip: Image.Image, frame_count: int) -> list[Image
     return [component_group_image(strip, group) for group in groups]
 
 
-def extract_component_frames(strip: Image.Image, frame_count: int, cell_width: int, cell_height: int, safe_margin_x: int, safe_margin_y: int, fit: dict[str, Any] | None = None) -> list[Image.Image] | None:
-    images = extract_component_images(strip, frame_count)
+def extract_component_frames(strip: Image.Image, frame_count: int, cell_width: int, cell_height: int, safe_margin_x: int, safe_margin_y: int, fit: dict[str, Any] | None = None, subject: str = "character") -> list[Image.Image] | None:
+    images = extract_component_images(strip, frame_count, subject=subject)
     if images is None:
         return None
     return [fit_to_cell(image, cell_width, cell_height, safe_margin_x, safe_margin_y, fit) for image in images]
@@ -3090,7 +3133,7 @@ def _run_locked(args: argparse.Namespace, run_dir: Path):
         스트립(=한 번의 생성) 단위 합의는 검출 실패 프레임의 fallback 전용이다
         — 테이크마다 생성이 달라 블록 크기가 다를 수 있어 합의도 스트립 단위다.
         """
-        images = extract_component_images(strip, frame_count)
+        images = extract_component_images(strip, frame_count, subject=getattr(args, "_subject_kind", "character"))
         method = "components"
         if images is None:
             if not args.allow_slot_fallback:
@@ -3268,7 +3311,7 @@ def _run_locked(args: argparse.Namespace, run_dir: Path):
             strip = _load_strip(state, state, raw_rel(request, state), frame_count)
             if strip is None:
                 continue
-            frames = extract_component_frames(strip, frame_count, cell_width, cell_height, safe_margin_x, safe_margin_y, fit_config)
+            frames = extract_component_frames(strip, frame_count, cell_width, cell_height, safe_margin_x, safe_margin_y, fit_config, subject=getattr(args, "_subject_kind", "character"))
             method = "components"
             if frames is None:
                 if not args.allow_slot_fallback:

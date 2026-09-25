@@ -138,12 +138,35 @@ def relative_posix(path: PurePath, start: PurePath) -> str:
 
 
 def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # On Windows, os.kill() calls TerminateProcess and would kill a living process.
+        # Use OpenProcess + GetExitCodeProcess for a non-destructive query.
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return exit_code.value == STILL_ACTIVE
+            return False
+        finally:
+            kernel32.CloseHandle(handle)
+
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
     except PermissionError:
         return True
+    except (ProcessLookupError, OSError):
+        return False
     return True
 
 

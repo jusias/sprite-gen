@@ -58,6 +58,13 @@ These public examples were generated through `prepare --subject effect`, `gen`, 
 
 ![subject-profile effect gallery](assets/subject-effects-gallery.png)
 
+## Component extraction — slot grouping vs seed proximity
+
+The two profiles also govern how component extraction (`sprite-gen extract`) groups connected pixels into frames:
+
+- **`character` (default)**: Selects the `frame_count` largest components as primary seeds, then attaches only satellite components overlapping a 15% expanded seed bounding box. Stray particles, detached chroma artifacts, and distant specks outside seed proximity are dropped to protect character silhouette stability and baseline grounding.
+- **`effect`**: Does not discard detached components outside seed proximity. Instead, valid components above the noise threshold (`max(12, largest_area * 0.002)`) are partitioned by frame slot boundaries (the horizontal slot span of each frame). Every scattered particle belonging to that slot is retained and merged into that frame's output image, allowing explosion bursts, debris, and scattered leaves to survive extraction intact. Components crossing slot boundaries emit a warning to keep boundary leaks observable. Noise components below the threshold are dropped with a logged count.
+
 ## Practices
 
 - Declare `subject` in the request. The request is the run's SSoT and travels with heal, curation, and later maintainers.
