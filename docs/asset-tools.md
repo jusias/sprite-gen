@@ -44,7 +44,7 @@ Supported inputs:
 | `video-loop` output `name.strip.json` | Reads matching `name.strip.png`; `frames`, `w`, `h`, `delay_ms` define the strip |
 | Runtime atlas `manifest.json` | Reads `sprite_sheet_alpha`, `frame_layout.rows` rectangles and `animation.rows` timing; multi-state atlases require `--state` |
 
-An arbitrary folder or animated GIF is not an implicit frame sequence. Export its frames and describe the order and durations explicitly:
+An arbitrary folder or animated GIF is not an implicit frame sequence. Passing a run folder fails with an instruction to use its `manifest.json` plus `--state`. For loose frames, export them and describe the order and durations explicitly:
 
 ```json
 {

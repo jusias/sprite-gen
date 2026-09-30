@@ -483,6 +483,23 @@ def test_prepare_carries_the_layer_keys_into_the_request(tmp_path: Path) -> None
     assert layers.validate_layer_request(request) == []
 
 
+def test_prepare_carries_documented_chroma_settings(tmp_path: Path) -> None:
+    chroma = {
+        "mode": "rgb",
+        "unmix_reach": 4,
+        "spill_max_fraction": 0.005,
+    }
+    out_dir, result = _prepare(tmp_path, {
+        "chroma": chroma,
+        "states": {"idle": {"frames": 2}},
+    })
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "dropped top-level request key(s) ['chroma']" not in result.stderr
+    request = json.loads((out_dir / "sprite-request.json").read_text(encoding="utf-8"))
+    assert request["chroma"] == chroma
+
+
 def test_prepare_writes_no_track_for_an_undeclared_row(tmp_path: Path) -> None:
     """An undeclared row IS `base`; writing that default would make every run a layer run."""
     out_dir, result = _prepare(tmp_path, {"states": {"idle": {"frames": 2}}})

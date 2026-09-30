@@ -7,7 +7,7 @@ import argparse
 import json
 import math
 from pathlib import Path
-from statistics import mean, pstdev
+from statistics import mean, median, pstdev
 from typing import Any
 
 from PIL import Image, ImageChops
@@ -24,6 +24,7 @@ D_HASH_BITS = 64
 DEFAULT_HISTOGRAM_MIN = 0.0
 DEFAULT_DHASH_MIN = 0.55
 DEFAULT_MOTION_MIN = 0.01
+DEFAULT_CROSS_DIRECTION_SCALE_TOLERANCE = 0.15
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -221,6 +222,30 @@ def _motion_presence(frames: list[Image.Image]) -> float:
     return mean(values) if values else 0.0
 
 
+def _content_scale(frames: list[Image.Image]) -> dict[str, float]:
+    opaque_counts = [
+        sum(image.getchannel("A").histogram()[17:])
+        for image in frames
+    ]
+    heights = []
+    for image in frames:
+        alpha = image.getchannel("A").point(lambda value: 255 if value > 16 else 0)
+        box = alpha.getbbox()
+        if box is not None:
+            heights.append(box[3] - box[1])
+    median_opaque_pixels = float(median(opaque_counts)) if opaque_counts else 0.0
+    median_height = float(median(heights)) if heights else 0.0
+    maximum_height = max(heights, default=0)
+    return {
+        "median_opaque_pixels": median_opaque_pixels,
+        "area_linear_size": math.sqrt(median_opaque_pixels),
+        "median_height": median_height,
+        "minimum_to_maximum_height_ratio": (
+            min(heights) / maximum_height if maximum_height > 0 else 0.0
+        ),
+    }
+
+
 def _similarity_summary(frames: list[Image.Image]) -> dict[str, Any]:
     histograms = [_rgb_histogram(frame) for frame in frames]
     hashes = [_dhash(frame) for frame in frames]
@@ -251,7 +276,62 @@ def _similarity_summary(frames: list[Image.Image]) -> dict[str, Any]:
             "x": pstdev(xs) if len(xs) > 1 else 0.0,
             "y": pstdev(ys) if len(ys) > 1 else 0.0,
         },
+        "content_scale": _content_scale(frames),
     }
+
+
+def _directional_pose(request: dict[str, Any], state: str) -> tuple[str, str] | None:
+    directions = [str(value) for value in ((request.get("directions") or {}).get("set") or [])]
+    for direction in sorted(directions, key=len, reverse=True):
+        prefix = f"{direction}_"
+        if state.startswith(prefix):
+            return direction, state[len(prefix):]
+    return None
+
+
+def _apply_cross_direction_scale_gate(
+    rows: list[dict[str, Any]],
+    request: dict[str, Any],
+    errors: list[str],
+    tolerance: float = DEFAULT_CROSS_DIRECTION_SCALE_TOLERANCE,
+) -> None:
+    grouped: dict[str, list[tuple[dict[str, Any], float]]] = {}
+    for row in rows:
+        directional_pose = _directional_pose(request, str(row.get("state", "")))
+        content_scale = (row.get("metrics") or {}).get("content_scale") or {}
+        linear_size = float(content_scale.get("median_height", 0.0))
+        pose_variation_ratio = float(content_scale.get("minimum_to_maximum_height_ratio", 1.0))
+        if directional_pose is None or linear_size <= 0 or pose_variation_ratio < 0.6:
+            continue
+        grouped.setdefault(directional_pose[1], []).append((row, linear_size))
+
+    minimum_ratio = 1.0 - tolerance
+    maximum_ratio = 1.0 + tolerance
+    for pose, entries in grouped.items():
+        if len(entries) < 2:
+            continue
+        baseline = float(median(value for _, value in entries))
+        peers = sorted(str(row["state"]) for row, _ in entries)
+        for row, linear_size in entries:
+            ratio = linear_size / baseline
+            row["metrics"]["cross_direction_scale"] = {
+                "linear_size": linear_size,
+                "pose_median": baseline,
+                "ratio": ratio,
+                "minimum_ratio": minimum_ratio,
+                "maximum_ratio": maximum_ratio,
+                "peers": peers,
+            }
+            if minimum_ratio <= ratio <= maximum_ratio:
+                continue
+            message = (
+                f"{row['state']}: cross-direction content scale is inconsistent "
+                f"({linear_size:.2f} vs {pose} median {baseline:.2f}, ratio {ratio:.3f} "
+                f"outside {minimum_ratio:.3f}..{maximum_ratio:.3f})"
+            )
+            row["errors"].append(message)
+            row["ok"] = False
+            errors.append(message)
 
 
 def _manifest_state_notes(run_dir: Path, state: str) -> tuple[dict[str, Any] | None, list[str], list[str]]:
@@ -385,6 +465,8 @@ def _inspect_run_impl(run_dir: Path, states: str = "all", **kwargs: object) -> d
         errors.extend(row_errors)
         warnings.extend(row_warnings)
 
+    _apply_cross_direction_scale_gate(rows, request, errors)
+
     return {
         "ok": not errors,
         "engine": "component-row",
@@ -395,6 +477,7 @@ def _inspect_run_impl(run_dir: Path, states: str = "all", **kwargs: object) -> d
             "histogram_min": args.histogram_min,
             "dhash_min": args.dhash_min,
             "motion_min": args.motion_min,
+            "cross_direction_scale_tolerance": DEFAULT_CROSS_DIRECTION_SCALE_TOLERANCE,
         },
         "rows": rows,
         "errors": errors,

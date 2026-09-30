@@ -75,6 +75,11 @@ def test_png_single_frame_defaults_to_one_second_and_bottom_centre(tmp_path):
         load_asset(source, state="walk")
 
 
+def test_directory_source_points_run_users_to_the_manifest(tmp_path):
+    with pytest.raises(ValueError, match=r"must be a file.*manifest\.json.*--state"):
+        load_asset(tmp_path)
+
+
 def test_descriptor_reads_ordered_frames_durations_anchor_and_every_file_hash(tmp_path):
     source = descriptor(tmp_path, anchor=[12, 38], durations=(0.05, 0.15, 0.1, 0.1, 0.4))
     seq = load_asset(source)

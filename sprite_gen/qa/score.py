@@ -95,6 +95,11 @@ def _hint_for_row(row: dict[str, Any], *, histogram_min: float, dhash_min: float
             hints.append(
                 f"{state}: Pixel-grid pitch instability was detected. Regenerate with a clearer true low-resolution pixel grid, or rerun extraction with the runlen crosscheck visible and review the before/after grid proof."
             )
+        elif "cross-direction content scale" in text:
+            hints.append(
+                f"{state}: The character size does not match the same state in the other directions. "
+                "Regenerate from the accepted direction anchor at the shared body scale; do not resize individual frames after generation."
+            )
     return hints
 
 

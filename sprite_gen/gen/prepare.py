@@ -471,7 +471,7 @@ def normalize_states(raw: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
 # after the fact (docs/layer-tracks.md §2 B1). The lists are the one place that
 # rule is written down, and `dropped_key_notes` makes every drop observable
 # instead of silent.
-REQUEST_KEYS_CARRIED = ("cell", "states", "style",
+REQUEST_KEYS_CARRIED = ("cell", "states", "style", "subject", "chroma",
                         "directions", "fit", "rig", "layers")
 # Written by prepare itself, from CLI flags and from measuring the base image. An
 # incoming copy is not carried either, but it is restated rather than lost, so the
@@ -973,6 +973,11 @@ def _run(args: argparse.Namespace):
         "states": states,
         "style": raw_request.get("style", args.style),
     }
+    raw_chroma = raw_request.get("chroma")
+    if raw_chroma is not None:
+        if not isinstance(raw_chroma, dict):
+            raise SystemExit("chroma must be an object")
+        request["chroma"] = dict(raw_chroma)
     # Subject profile: CLI wins over --request-json; absent = character. The
     # field stays omitted for the default so the request has one canonical
     # representation. Downstream validation derives its floor from this plus

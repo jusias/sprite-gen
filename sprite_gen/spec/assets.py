@@ -213,6 +213,10 @@ def _integer(value, name):
 
 def load_asset(source: Path, *, state=None, fps=None, anchor=None) -> FrameSequence:
     source = Path(source).expanduser().resolve()
+    if source.is_dir():
+        raise ValueError(
+            "asset source must be a file; for a sprite-gen run use manifest.json with --state"
+        )
     snapshot = _Snapshot()
     meta = {"source": str(source)}
     declared_anchor = None

@@ -2,6 +2,14 @@
 
 All notable public changes to `sprite-gen` are recorded here. Versions track the `version:` field in `SKILL.md` and `pyproject.toml`.
 
+## Unreleased
+
+- `inspect` now measures each row's median opaque bounding-box height and rejects same-pose direction rows whose character scale differs by more than 15% from the directional median. Highly deforming rows such as death animations are excluded from this comparison.
+- Scale failures produce a correction hint that requires regeneration from the accepted direction anchor at a shared body scale; per-frame resizing is not prescribed as a repair.
+- `prepare` now preserves the documented top-level `chroma` extraction settings instead of warning that they were dropped and forcing a manual request-file patch after every rerun.
+- Shared asset loading now rejects a directory with an actionable `manifest.json` plus `--state` message instead of leaking an operating-system `PermissionError`.
+- Correction-loop tests invoke the active sprite-gen interpreter through `sys.executable`, so Windows no longer requires an unrelated global `python3` command.
+
 ## v2.5.3 - Reference facing controls and observed action returns
 
 - Reference edits can opt into `gen --facing right|left` to request orientation in the generation prompt. The default `preserve` leaves existing generation callers unchanged.

@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from conftest import run_script
+from sprite_gen.qa import inspect, score
 
 
 def test_inspect_scores_extracted_fixture(fixture_run_dir: Path) -> None:
@@ -20,6 +22,7 @@ def test_inspect_scores_extracted_fixture(fixture_run_dir: Path) -> None:
     assert inspect_report["rows"][0]["metrics"]["histogram_intersection"]["min"] <= 1.0
     assert inspect_report["rows"][0]["metrics"]["dhash_similarity"]["min"] <= 1.0
     assert "motion_presence" in inspect_report["rows"][0]["metrics"]
+    assert inspect_report["rows"][0]["metrics"]["content_scale"]["median_height"] > 0
 
     scored = run_script(
         "score_sprite_run.py",
@@ -29,6 +32,49 @@ def test_inspect_scores_extracted_fixture(fixture_run_dir: Path) -> None:
     score_report = json.loads((fixture_run_dir / "sprite-score.report.json").read_text(encoding="utf-8"))
     assert score_report["ok"] is True
     assert score_report["overall_score"] >= 90
+
+
+def test_cross_direction_scale_drift_fails_and_produces_regeneration_hint() -> None:
+    request = {"directions": {"set": ["south", "east", "north", "west"]}}
+    rows = [
+        {
+            "state": state,
+            "metrics": {
+                "content_scale": {
+                    "median_height": linear_size,
+                    "minimum_to_maximum_height_ratio": 0.8,
+                }
+            },
+            "ok": True,
+            "errors": [],
+            "warnings": [],
+            "expected_frames": 4,
+            "found_frames": 4,
+        }
+        for state, linear_size in (
+            ("south_attack", 98.0),
+            ("east_attack", 80.5),
+            ("north_attack", 103.0),
+            ("west_attack", 101.5),
+        )
+    ]
+    errors: list[str] = []
+
+    inspect._apply_cross_direction_scale_gate(rows, request, errors)
+
+    east = next(row for row in rows if row["state"] == "east_attack")
+    assert east["ok"] is False
+    assert east["metrics"]["cross_direction_scale"]["ratio"] < 0.85
+    assert any("cross-direction content scale" in message for message in east["errors"])
+    scored = score.score_inspection(
+        {
+            "run_dir": "/fixture",
+            "thresholds": {},
+            "rows": rows,
+        }
+    )
+    assert scored["ok"] is False
+    assert any("shared body scale" in hint for hint in scored["hints"])
 
 
 def test_raw_frame_count_defect_produces_correction_hint(fixture_run_dir: Path) -> None:
@@ -86,7 +132,7 @@ def test_correction_loop_min_attempts_forces_provider_then_converges(fixture_run
         "--out-dir", str(out_dir),
         "--max-passes", "3",
         "--min-attempts", "2",
-        "--provider-command", f"python3 {provider} {fixture_run_dir} {{next_run_dir}}",
+        "--provider-command", f'"{sys.executable}" "{provider}" "{fixture_run_dir}" "{{next_run_dir}}"',
     )
     assert result.returncode == 0, result.stdout + result.stderr
     loop_report = json.loads((out_dir / "correction-loop.report.json").read_text(encoding="utf-8"))
@@ -108,7 +154,7 @@ def test_correction_loop_does_not_generate_after_last_attempt(fixture_run_dir: P
         "--states", "walk",
         "--out-dir", str(out_dir),
         "--max-passes", "1",
-        "--provider-command", "python3 -c 'raise SystemExit(9)'",
+        "--provider-command", f'"{sys.executable}" -c "raise SystemExit(9)"',
     )
     assert result.returncode == 1
     assert not (out_dir / "attempt-1" / "provider.log").exists()
